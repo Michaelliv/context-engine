@@ -2,7 +2,7 @@
 
 **Open source primitives for agent context management.**
 
-We're building trillion-parameter models and feeding them `printf`.
+We're building trillion-parameter models and jamming context into them with string concatenation.
 
 Everyone's talking about what context to feed their agents. Almost no one is building the *engineering* infrastructure to do it well. Tool results are strings. System prompts are concatenated. Context management doesn't manage anything.
 
