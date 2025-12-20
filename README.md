@@ -1,16 +1,26 @@
-# context-engine
+# agent-harness
 
-**Open source primitives for agent context management.**
+**Defining the behaviors that LLM frameworks leave undefined.**
 
 We're building trillion-parameter models and jamming context into them with string concatenation.
 
-Everyone's talking about what context to feed their agents. Almost no one is building the *engineering* infrastructure to do it well. Tool results are strings. System prompts are concatenated. Context management doesn't manage anything.
+Every agent framework gives you the same thing: a loop. Call the model, parse tool calls, execute tools, feed results back, repeat. They all nail this part.
 
-The discipline needs definition. Everyone says "context engineering" but nobody specifies what that actually means. This project is a proposal.
+But here's what they leave undefined:
+
+- When does the agent stop based on what's actually happened?
+- What context gets injected where?
+- How do tool outputs render for models vs UIs?
+- How do you enforce tool behaviors?
+- How do you remind the model of constraints?
+
+The agent harness defines these behaviors.
 
 ---
 
-## The Shape of Every Conversation
+## Injection Points
+
+Every conversation has the same shape:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -32,83 +42,104 @@ The discipline needs definition. Everyone says "context engineering" but nobody 
 └─────────────────────────────────────────────────────────┘
 ```
 
-Every conversation has this shape. Frameworks define how the tool loop works - calling, parsing, error handling. But context injection points? Undefined.
-
-Nobody specifies this. Some developers discover it, then hack something together.
+Frameworks define how messages flow. The harness defines what gets injected at each point, when, and why.
 
 ---
 
-## The Primitives
+## The Seven Behaviors
 
-Five core building blocks:
+### 1. Tool Output Protocol
 
-### Renderable Context Components
-
-Tools serve two consumers: UIs and models. UIs want structured JSON. Models want whatever format aids comprehension - markdown tables, XML tags, prose. Today these are conflated.
-
-A tool output protocol separates them:
+Tools serve two consumers: UIs and models. UIs want structured JSON. Models want whatever format aids comprehension.
 
 ```
 ┌─────────────────────────────────────────┐
-│ Protocol Version                        │
-├─────────────────────────────────────────┤
 │ Structured Data (JSON)                  │  → for UIs, logging, debugging
 ├─────────────────────────────────────────┤
 │ Model Rendering                         │  → format optimized for LLM
 ├─────────────────────────────────────────┤
-│ System Reminders                        │  → context to inject with result
+│ Attached Reminders                      │  → context to inject with result
 └─────────────────────────────────────────┘
 ```
 
-Renderable context components formalize this. The tool returns structured data. A renderer converts it to model format. Reminders attach as metadata. Components compose - a `<CodeContext>` contains `<File>` components, each containing `<Function>` components. Same data, multiple renderings.
+One tool output, multiple renderings.
 
-### Queryable Conversations
+### 2. Conversation State
 
-Treat conversation history as an event stream. Every interaction is an event: messages, tool calls, results, failures. Append-only, immutable.
+Treat conversation history as queryable state. Not just a list of messages - an event stream with views.
 
-The power is in the views. Materialized projections over the stream that answer questions:
-
-- What tools have failed, and how many times?
+- How many times has this tool failed?
 - What has the model already tried?
-- What entities have been mentioned?
+- How much context has accumulated?
 - Is the model stuck in a loop?
 
-Views are derived from the stream, can be rebuilt anytime, and replace scattered imperative bookkeeping with declarative queries.
+Views over the stream, not scattered bookkeeping.
 
-### Reactive Injection
+### 3. System Reminders
 
-Given queryable conversations, we can define rules that trigger context injection. Two flavors:
+Context that gets injected at injection points. Three levels:
 
-**State-based:** Rules that fire when conversation state matches a condition - consecutive failures, topic shift, context window pressure. "You've tried this approach twice. Consider an alternative."
+**System-level**: Seed the system message with awareness that reminders exist. Include a few-shot example so the model knows the format and pays attention.
 
-**Tool-bound:** Rules attached to tools that fire with tool results. The `write_file` tool carries a reminder to validate paths. Only surfaces when that tool is called.
+**Message-level**: Reminders that attach to user messages or tool responses.
 
-### Injection Queue
+**Tool-level**: Reminders bound to specific tools. Only surfaces when that tool is called.
 
-Reminders accumulate between injection points. A queue manages them: prioritization, batching, deduplication. When an injection point arrives, the queue flushes strategically. High-priority safety reminders first. Contextual hints batched together. The queue is the traffic controller.
+### 4. Stop Conditions
 
-### Hookable Architecture
+When does the agent stop? Define it explicitly:
 
-Plugin system for everything. Custom rule definitions? Hook. Custom rendering? Hook. Custom injection strategy? Hook. The core provides primitives, not opinions. Developers implement their own interaction patterns through hooks.
+- **Turn limit**: Stop after N turns
+- **Token budget**: Stop when context exceeds threshold
+- **Task completion**: Stop when a condition is met
+- **Error threshold**: Stop after N consecutive failures
+- **Custom rules**: Any condition over conversation state
+
+Integrated with conversation state, not isolated flags.
+
+### 5. Tool Enforcement Rules
+
+Rules that govern tool behavior:
+
+- **Sequencing**: "Always read a file before editing it"
+- **Confirmation**: "Confirm with user before deleting files"
+- **Rate limiting**: "Max 3 retries per tool per turn"
+- **Auto-actions**: "When context exceeds 80%, trigger compaction"
+
+These aren't suggestions to the model. They're enforced by the harness.
+
+### 6. Injection Queue
+
+Reminders accumulate. A queue manages them:
+
+- Prioritization (safety reminders first)
+- Batching (group related context)
+- Deduplication (don't repeat yourself)
+
+When an injection point arrives, the queue flushes strategically.
+
+### 7. Hooks
+
+Plugin system for everything. Custom stop conditions? Hook. Custom rendering? Hook. Custom injection logic? Hook.
+
+The harness provides structure. Hooks provide flexibility.
 
 ---
 
-## The Engine
+## Architecture
 
-The engine sits alongside agent execution, not inside it. Middleware that observes the conversation stream, maintains state, and injects context at boundaries.
+A harness guides without replacing. It wraps the agent loop, observes the conversation, enforces rules, injects context.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    Agent Framework                      │
-│              (LangChain, CrewAI, raw API)               │
 └─────────────────────┬───────────────────────────────────┘
-                      │ conversation messages
+                      │ conversation
                       ▼
 ┌─────────────────────────────────────────────────────────┐
-│                   context-engine                        │
+│                    Agent Harness                        │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐  │
-│  │  Event   │→ │   Rule   │→ │  Queue   │→ │Renderer │  │
-│  │  Store   │  │  Engine  │  │ Manager  │  │         │  │
+│  │  State   │→ │  Rules   │→ │  Queue   │→ │Renderer │  │
 │  └──────────┘  └──────────┘  └──────────┘  └─────────┘  │
 └─────────────────────┬───────────────────────────────────┘
                       │ enriched context
@@ -118,15 +149,13 @@ The engine sits alongside agent execution, not inside it. Middleware that observ
 └─────────────────────────────────────────────────────────┘
 ```
 
-Framework-agnostic. It doesn't care if you're using LangChain, CrewAI, Claude's tool use, or raw API calls.
-
-The processing model is unified: rule engine, context accumulation, injection. Whether you're injecting based on a user message keyword or a tool failure pattern, the machinery is the same.
+The goal: framework-agnostic. Should work with LangChain, CrewAI, Vercel AI SDK, or raw API calls.
 
 ---
 
 ## Status
 
-**This project is in early design phase.** The architecture above is a proposal, not an implementation.
+**Early development.** This is a specification and work in progress.
 
 We're looking for collaborators to help shape and build this.
 
@@ -134,26 +163,30 @@ We're looking for collaborators to help shape and build this.
 
 ## Get Involved
 
-- **[Discussions](https://github.com/Michaelliv/context-engine/discussions)** - Share ideas, ask questions, debate architecture
-- **[Issues](https://github.com/Michaelliv/context-engine/issues)** - Propose features or report problems with the design
+- **[Discussions](https://github.com/Michaelliv/agent-harness/discussions)** - Share ideas, ask questions, debate architecture
+- **[Issues](https://github.com/Michaelliv/agent-harness/issues)** - Propose features or report problems with the design
 - **Star the repo** - Help others find this project
 
 ### Open Questions
 
-We're actively thinking through:
-
-1. What's the right event schema for conversation logging?
+1. What's the right event schema for conversation state?
 2. How should rules be expressed? DSL vs code?
 3. What's the integration surface for existing frameworks?
 4. TypeScript, Python, or both?
 
-If you have opinions, [start a discussion](https://github.com/Michaelliv/context-engine/discussions/new).
+If you have opinions, [start a discussion](https://github.com/Michaelliv/agent-harness/discussions/new).
+
+---
+
+## Implementations
+
+- [agent-harness-ai-sdk](https://github.com/Michaelliv/agent-harness-ai-sdk) - Vercel AI SDK implementation (in progress)
 
 ---
 
 ## Related Reading
 
-- [Context Engineering Has No Engine](https://michaellivs.com/blog/context-engineering-open-call) - The blog post that started this
+- [The Agent Harness](https://michaellivs.com/blog/agent-harness) - The blog post explaining this project
 
 ---
 
